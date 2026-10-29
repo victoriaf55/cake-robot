@@ -1,0 +1,23 @@
+# ROS 2 workspace output
+build/
+install/
+log/
+
+# Python output
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+
+# Test output
+.pytest_cache/
+
+# Editors and operating systems
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
