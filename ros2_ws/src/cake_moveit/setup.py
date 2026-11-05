@@ -24,6 +24,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            'draw_design = cake_moveit.scripts.draw_design:main',
             'pen = cake_moveit.scripts.pen:main',
         ],
     },
