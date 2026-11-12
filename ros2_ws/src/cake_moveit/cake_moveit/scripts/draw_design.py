@@ -1,167 +1,99 @@
-"""
-Final project for ME442L Intro to Robotics. Programs Kinova Gen3 Lite arm to trace cookie cake design
+"""Trace a basic horizontal circle using the configured cake geometry."""
 
-Run with gazebo simulation and MoveIt already running: ros2 run cake_moveit draw_design
-"""
+import threading
 
-import time
+import rclpy
+from rclpy.executors import MultiThreadedExecutor
 
+from cake_moveit.scripts.arm import ArmNode, init_ros
+from cake_moveit.scripts.cake_coordinates import CakeGeometry
 from cake_moveit.scripts.pen import PenClient
 
-from cake_moveit.scripts.arm import (
-    Y_MIN,
-    Y_MAX,
-    Z_MIN,
-    Z_MAX, 
-    PRESS_X,
-    HOVER_X,
-    RETRACT,
-    WORK,
-    ArmNode,
-    init_ros,
-    run,
-)
 
-NETID = "vyf"
+class DrawCircle(ArmNode):
+    """Move home, approach, draw a circle, lift, and return home."""
 
-class WriteInitials(ArmNode):
-    def __init__(self) -> None:
-        super().__init__("write_initials")
-        self.pen = PenClient(self)
-        self.get_logger().info(f"Midterm write initials started ({NETID}).")
+    def __init__(self):
+        super().__init__('draw_circle')
+        defaults = CakeGeometry()
+        for name, value in vars(defaults).items():
+            # A negative sentinel distinguishes an unmeasured tool offset.
+            self.declare_parameter(name, -1.0 if value is None else value)
+        self.declare_parameter('visualize_pen', False)
+        self.pen = None
 
-
-    def start(self) -> bool:
-        """From wherever the arm is, fold to RETRACT, then go to WORK.
-        """
-        return self.move_to_joints(RETRACT) and self.move_to_joints(WORK)
-
-    def draw_stroke(self, 
-                    points: list[tuple[float, float]],
-                    pen_up_name: str | None=None,
-                    pen_down_name: str | None=None) -> bool:
-        """Draw one connected stroke through (y, z) board coordinates."""
-        # Make sure two points are input
-        if len(points) < 2:
-            self.get_logger().error("A stroke needs at least two points.")
+    def draw_circle(self):
+        """Stop the sequence immediately if any planned motion fails."""
+        values = {name: self.get_parameter(name).value
+                  for name in vars(CakeGeometry())}
+        try:
+            geometry = CakeGeometry(**values)
+        except ValueError as exc:
+            self.get_logger().error(
+                f'Invalid cake geometry: {exc}. Set nozzle_offset to the '
+                'measured tool length in meters before moving.')
             return False
-
-        # Check that points are within writing box bounds
-        for y, z in points:
-            if not Y_MIN <= y <= Y_MAX or not Z_MIN <= z <= Z_MAX:
-                self.get_logger().error(
-                    f"Point ({y:.3f}, {z:.3f}) is outside the writing box."
-                )
+        targets = geometry.waypoints()['end_effector_waypoints']
+        if targets is None:
+            return False
+        if self.get_parameter('visualize_pen').value:
+            self.pen = PenClient(self)
+            if not self.pen.clear():
                 return False
 
-        start_y, start_z = points[0]
+        # Match the collision tabletop to the geometry used for target heights.
+        self.moveit2.add_collision_box(
+            id='table', size=(1.0, 1.0, 0.05),
+            position=(0.0, 0.0, geometry.tabletop_z - 0.025),
+            quat_xyzw=(0.0, 0.0, 0.0, 1.0), frame_id='base_link')
 
-        # Travel in front of the board
-        if not self.move_to_pose(HOVER_X, start_y, start_z):
+        if not self.move_to_pose(*targets['home']):
             return False
-        # For recording poses
-        if pen_up_name is not None:
-            self.record_key_pose(pen_up_name)    
-        # Press straight into board
-        if not self.move_to_pose(PRESS_X, start_y, start_z, cartesian=True):
+        if not self.move_to_pose(*targets['approach'], cartesian=True):
             return False
-        # For recording poses
-        if pen_down_name is not None:
-            self.record_key_pose(pen_down_name)
-
-        # Draw every connected segment as a full Cartesian path
-        self.pen.down()
-        current_y, current_z = start_y, start_z
-
-        for y, z in points[1:]:
-            if not self.move_to_pose(PRESS_X, y, z, cartesian=True):
+        if not self.move_to_pose(*targets['circle'][0], cartesian=True):
+            return False
+        if self.pen is not None and not self.pen.down():
+            return False
+        try:
+            for point in targets['circle'][1:]:
+                if not self.move_to_pose(*point, cartesian=True):
+                    # Actual position may be partway through a failed segment;
+                    # do not issue a recovery motion from an assumed position.
+                    return False
+        finally:
+            if self.pen is not None:
                 self.pen.up()
-                self.move_to_pose(HOVER_X, current_y, current_z, cartesian=True)
-                return False
-
-        # Lift before traveling to a disconnected stroke
-        self.pen.up()
-        end_y, end_z = points[-1]
-        return self.move_to_pose(HOVER_X, end_y, end_z, cartesian=True)
-
-
-    def record_key_pose(self, name: str) -> None:
-        """Log measured joint values for one required kinematics key pose."""
-        time.sleep(0.25)
-        joints = self.joint_positions()
-        if joints is None:
-            self.get_logger().error(f"Could not read joint values for {name}.")
-            return
-
-        values = ", ".join(f"{joint:.6f}" for joint in joints)
-        self.get_logger().info(f"{name} = [{values}]")
+        if not self.move_to_pose(*targets['lift'], cartesian=True):
+            return False
+        if not self.move_to_pose(*targets['return_home'], cartesian=True):
+            return False
+        self.get_logger().info('Circle complete; nozzle is at home hover.')
+        return True
 
 
-    def run_initial_1(self) -> None:
-        """Write V as one connected stroke on the left side of the board."""
-        self.get_logger().info("Writing initial 1: V")
-        if not self.start():
-            return
-
-        v_stroke = [
-            (0.18, 0.26),  # top-left
-            (0.10, 0.08),  # bottom point
-            (0.02, 0.26),  # top-right
-        ]
-
-        self.pen.clear()
-        # Draw "V". Record pen up and pen down position
-        if not self.draw_stroke(v_stroke,
-                                pen_up_name="pen_up_first_letter",
-                                pen_down_name="pen_down_first_letter"
-        ):
-            self.get_logger().error("Could not finish V.")
-            return
-        self.get_logger().info("Finished V.")
-
-    def run_initial_2(self) -> None:
-        """Write F using three disconnected strokes."""
-        self.get_logger().info("Writing initial 2: F")
-        # if not self.start():
-        #     return
-
-        vertical = [
-            (-0.04, 0.26),  # top-left
-            (-0.04, 0.08),  # bottom-left
-        ]
-        top_bar = [
-            (-0.04, 0.26),  # left
-            (-0.19, 0.26),  # right
-        ]
-        middle_bar = [
-            (-0.04, 0.17),  # left
-            (-0.16, 0.17),  # right
-        ]
-
-        # Record pen down position
-        if not self.draw_stroke(vertical, pen_down_name="pen_down_second_letter"):
-            self.get_logger().error("Could not finish F.")
-            return
-        for stroke in (top_bar, middle_bar):
-            if not self.draw_stroke(stroke):
-                self.get_logger().error("Could not finish F.")
-                return
-        if not self.move_to_joints(RETRACT):
-            self.get_logger().error("Could not retract after F.")
-            return
-        self.get_logger().info("Finished F.")
-
-
-def main() -> None:
+def main():
+    """Run one circle after MoveIt is ready."""
     init_ros()
-    node = WriteInitials()
+    node = DrawCircle()
+    executor = MultiThreadedExecutor(num_threads=2)
+    executor.add_node(node)
+    thread = threading.Thread(target=executor.spin, daemon=True)
+    thread.start()
+    success = False
+    try:
+        if node.wait_until_ready():
+            success = node.draw_circle()
+            if not success:
+                node.get_logger().error('Circle sequence stopped before completion.')
+    finally:
+        executor.shutdown()
+        thread.join()
+        node.destroy_node()
+        rclpy.try_shutdown()
+    if not success:
+        raise SystemExit(1)
 
-    run(
-        node,
-        {1: node.run_initial_1, 2: node.run_initial_2},
-        default=[1, 2],
-    )
 
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
