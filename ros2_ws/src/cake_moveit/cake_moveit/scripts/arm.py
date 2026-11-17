@@ -1,11 +1,4 @@
-"""The arm and motion helpers for Midterm.
-
-write_initials.py uses the ArmNode class below. Its methods wrap the midterm
-plan, check for None, execute, and wait sequence. Two methods add behavior:
-
-  - move_to_pose() takes a speed factor, so the last few centimeters of a
-    descent can be slower than the rest of the motion.
-"""
+"""MoveIt motion helpers for the cake-decorating arm."""
 
 from __future__ import annotations
 
@@ -14,7 +7,6 @@ import signal
 import sys
 import threading
 import time
-import math
 from collections.abc import Callable
 
 import rclpy
@@ -29,37 +21,13 @@ from sensor_msgs.msg import JointState
 
 ARM_JOINTS = ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"]
 
-# Joint configurations, radians, joint_1 first.
-# RETRACT is the Gen3 Lite's own folded pose, the one the real arm parks in.
-# From RETRACT most straight-line moves are impossible, so every run goes to
-# WORK first: an elbow-up pose above the table from which the pick and place
-# poses below are reachable.
-RETRACT = [-0.0527, 0.3669, 2.59, -1.5359, -0.6988, -1.5189]
-WORK = [0.40, 0.02, 2.27, -1.57, -0.84, 1.97]
-
-# Gripper pointing into board, as a quaternion (x, y, z, w).
-INTO_BOARD = (0.0, math.sqrt(0.5), 0.0, math.sqrt(0.5))
-
-# Positions of end_effector_link in base_link, meters. The arm's base sits
-# MOUNT_OFFSET (0.0627) above the tabletop (see table.py), and the pen tip
-# is TIP_OFFSET beyond end_effector_link, so at PRESS_POS the pen tip
-# is pressed into the board, and at HOVER_POS the pen tip is just infront of it
-TIP_OFFSET = 0.222
-BOARD_X = 0.550
-PRESS_DIST = 0.005
-HOVER_DIST = 0.020
-Y_MIN = -0.250
-Y_MAX = 0.250
-Z_MIN = 0.040
-Z_MAX = 0.300
-SPEED = 0.20
-PRESS_X = BOARD_X - TIP_OFFSET + PRESS_DIST
-HOVER_X = BOARD_X - TIP_OFFSET - HOVER_DIST
-
+# Tool local +Z points downward in base_link (quaternion x, y, z, w).
+TOP_DOWN = (0.0, 1.0, 0.0, 0.0)
+SPEED = 0.10
 
 
 class ArmNode(Node):
-    """A ROS 2 node with MoveIt, the gripper, and measured joint positions."""
+    """A ROS 2 node with MoveIt and measured joint positions."""
 
     def __init__(self, name: str) -> None:
         super().__init__(name)
@@ -147,10 +115,10 @@ class ArmNode(Node):
         cartesian: bool = False,
         attempts: int = 3,
     ) -> bool:
-        """Move end_effector_link to (x, y, z) in base_link, gripper pointing into board.
+        """Move end_effector_link to (x, y, z) in base_link, tool pointing down.
 
         cartesian=True moves in a straight line and fails rather than bend the
-        path. speed scales velocity and acceleration, 0.01 to 1.0.
+        path. Velocity and acceleration scaling use SPEED.
         """
         pose = Pose()
         pose.position.x, pose.position.y, pose.position.z = x, y, z
@@ -159,7 +127,7 @@ class ArmNode(Node):
             pose.orientation.y,
             pose.orientation.z,
             pose.orientation.w,
-        ) = INTO_BOARD
+        ) = TOP_DOWN
         self.moveit2.max_velocity = SPEED
         self.moveit2.max_acceleration = SPEED
         try:
